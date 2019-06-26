@@ -1,0 +1,457 @@
+---
+title: "Modi (10 days Data)Sentiment Analysis"
+output:
+  html_document: default
+  html_notebook: default
+---
+
+# Data Preparation
+
+We are using a dataset collected fro twitter for sentiment-analysis of political figure and prime minister- Narendra Modim.
+
+This is the plan going forward:
+
++  
+
+So let's get started.
+
+```{r warning=FALSE, message=FALSE}
+if(!require(qdap)) {install.packages("qdap")}
+library(qdap)
+library(tm)
+library(tidytext)
+library(tidyverse)
+
+# load and clean the dataset
+   
+dataframe=read.csv('D:/personal/ISB/pgdba/CBA/offer/CBA/Course/term 1/Practicum/Modi_df_1.csv', stringsAsFactors = F)
+df=dataframe$text[sample(nrow(dataframe), 4000) ]
+
+
+head(df,5) #uncleaned data
+df=gsub("?(f|ht)(tp)(s?)(://)(.*)[.|/](.*)"," ",df,ignore.case = TRUE) #cleaning all the URLs
+df=gsub("(@[A-Za-z0-9]+)|([^A-Za-z \t /t // ])|(<[a-z0-9A-Z+]{0,}>)", " ", df,ignore.case = TRUE) #cleaning characters othe than alphanumeric
+df =  tolower(df)    
+
+ # read std stopwords list from a text file
+stpw1 = readLines('D:/personal/ISB/pgdba/CBA/offer/CBA/Course/term 1/Practicum/current df/stopwords.txt')
+
+# tm package stop word list; tokenizer package has the same name function, hence 'tm::'
+stpw2 = tm::stopwords('english')      
+comn  = unique(c(stpw1, stpw2,'modi','narendra','ji','modiji','narendramodi','sir','indian','pm','NaMo'))      # Union of the two lists
+stopwords = unique(gsub("'"," ",comn))  # final stop word list after removing punctuation
+
+# removing stopwords created above
+df  =  removeWords(df,stopwords)        	 
+df  =  stripWhitespace(df)                
+df  =  rm_white(df)
+df  =  unique(df)
+print("Sample Data After Cleaning")
+head(df,10) #cleaned data
+```
+### Func 2: DTM builder (whether TF or IDF)
+
+We saw how to build DTMs. Let us functionize that code in general terms so that we can repeatedly invoke the func where required.  
+
+```{r dtm.build}
+ dtm_build <- function(raw_corpus, tfidf=FALSE)
+ {  				# func opens
+
+ require(tidytext); require(tibble); require(tidyverse)
+
+ # converting raw corpus to tibble to tidy DF
+ textdf = data_frame(text = raw_corpus);    textdf
+
+ tidy_df = textdf %>%
+                    mutate(doc = row_number()) %>%
+                    unnest_tokens(word, text) %>%
+                    anti_join(stop_words) %>%
+                    group_by(doc) %>%
+                    count(word, sort=TRUE)
+ tidy_df
+	
+ # evaluating IDF wala DTM
+ if (tfidf == "TRUE") {
+	textdf1 = tidy_df %>%
+			group_by(doc) %>%
+			count(word, sort=TRUE) %>% ungroup() %>%
+			bind_tf_idf(word, doc, nn) %>%   # 'nn' is default colm name
+			rename(value = tf_idf)} else { textdf1 = tidy_df %>% rename(value = n)  }
+
+ textdf1
+
+ dtm = textdf1 %>% cast_sparse(doc, word, value);    dtm[1:9, 1:9]
+ 
+ # order rows and colms putting max mass on the top-left corner of the DTM
+  colsum = apply(dtm, 2, sum)
+  col.order = order(colsum, decreasing=TRUE)
+  row.order = order(rownames(dtm) %>% as.numeric())
+
+  dtm1 = dtm[row.order, col.order];    dtm1[1:8,1:8]
+
+ return(dtm1)  }   # func ends
+
+ # testing func 2 on df data
+ system.time({ dtm_df_tf = dtm_build(df) })    # 0.02 secs
+ system.time({ dtm_df_idf = dtm_build(df, tfidf=TRUE) })  # 0.05 secs
+```
+### Func 3: wordcloud building
+
+```{r wordcl}
+ build_wordcloud <- function(dtm, 
+                                max.words1=150,     # max no. of words to accommodate
+                                min.freq=5,       # min.freq of words to consider
+                                plot.title="wordcloud"){          # write within double quotes
+
+ require(wordcloud)
+ if (ncol(dtm) > 20000){   # if dtm is overly large, break into chunks and solve
+
+ tst = round(ncol(dtm)/100)  # divide DTM's cols into 100 manageble parts
+ a = rep(tst,99)
+ b = cumsum(a);rm(a)
+ b = c(0,b,ncol(dtm))
+
+ ss.col = c(NULL)
+ for (i in 1:(length(b)-1)) {
+  tempdtm = dtm[,(b[i]+1):(b[i+1])]
+  s = colSums(as.matrix(tempdtm))
+  ss.col = c(ss.col,s)
+  print(i)      } # i loop ends
+
+ tsum = ss.col
+
+ } else { tsum = apply(dtm, 2, sum) }
+
+ tsum = tsum[order(tsum, decreasing = T)]       # terms in decreasing order of freq
+ head(tsum);    tail(tsum)
+
+ # windows()  # Opens a new plot window when active
+ wordcloud(names(tsum), tsum,     # words, their freqs 
+          scale = c(3.0, 0.4),     # range of word sizes
+          min.freq,                     # min.freq of words to consider
+          max.words = max.words1,       # max #words
+          colors = brewer.pal(8, "Dark2"))    # Plot results in a word cloud 
+ title(sub = plot.title)     # title for the wordcloud display
+
+    } # func ends
+
+ # test-driving func 3 via df data
+ system.time({ build_wordcloud(dtm_df_tf, plot.title="df TF wordlcoud") })    # 0.4 secs
+```
+ And now, test driving the IDF one...
+
+```{r idf_wordcl}
+ system.time({ build_wordcloud(dtm_df_idf, plot.title="df IDF wordlcoud", min.freq=2) })    # 0.09 secs
+```
+
+### Func 4: Simple Bar.charts of top tokens
+
+ Self-explanatory. And simple. But just for completeness sake, making a func out of it.  
+
+```{r func4}
+ plot.barchart <- function(dtm, num_tokens=15, fill_color="Blue")
+ {
+ a0 = apply(dtm, 2, sum)
+ a1 = order(a0, decreasing = TRUE)
+ tsum = a0[a1]
+
+ # plot barchart for top tokens
+ test = as.data.frame(round(tsum[1:num_tokens],0))
+
+ # windows()  # New plot window
+ require(ggplot2)
+ p = ggplot(test, aes(x = rownames(test), y = test[,1])) + 
+       geom_bar(stat = "identity", fill = fill_color) +
+       geom_text(aes(label = test[,1]), vjust= -0.20) + 
+       theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ plot(p) }  # func ends
+
+ # testing above func
+ system.time({ plot.barchart(dtm_df_tf) })    # 0.1 secs
+ # system.time({ plot.barchart(dtm_df_idf, num_tokens=12, fill_color="Red") })    # 0.11 secs
+``` 
+### Func 5: Co-occurrence graphs (COGs)
+
+ COGs as the ame suggests connects those tokens together that most co-occur within documents, using a network graph wherein the nodes are tokens of interest. 
+
+```{r cog}
+ distill.cog = function(dtm, # input dtm
+                       title="COG", # title for the graph
+                       central.nodes=4,    # no. of central nodes
+                       max.connexns = 5){  # max no. of connections  
+ 
+ # first convert dtm to an adjacency matrix
+ dtm1 = as.matrix(dtm)   # need it as a regular matrix for matrix ops like %*% to apply
+ adj.mat = t(dtm1) %*% dtm1    # making a square symmatric term-term matrix 
+ diag(adj.mat) = 0     # no self-references. So diag is 0.
+ a0 = order(apply(adj.mat, 2, sum), decreasing = T)   # order cols by descending colSum
+ mat1 = as.matrix(adj.mat[a0[1:50], a0[1:50]])
+
+  # now invoke network plotting lib igraph
+  library(igraph)
+
+  a = colSums(mat1) # collect colsums into a vector obj a
+  b = order(-a)     # nice syntax for ordering vector in decr order  
+  
+  mat2 = mat1[b, b]     # order both rows and columns along vector b  
+  diag(mat2) =  0
+  
+  ## +++ go row by row and find top k adjacencies +++ ##
+
+  wc = NULL
+  
+  for (i1 in 1:central.nodes){ 
+    thresh1 = mat2[i1,][order(-mat2[i1, ])[max.connexns]]
+    mat2[i1, mat2[i1,] < thresh1] = 0   # neat. didn't need 2 use () in the subset here.
+    mat2[i1, mat2[i1,] > 0 ] = 1
+    word = names(mat2[i1, mat2[i1,] > 0])
+    mat2[(i1+1):nrow(mat2), match(word,colnames(mat2))] = 0
+    wc = c(wc, word)
+  } # i1 loop ends
+  
+  
+  mat3 = mat2[match(wc, colnames(mat2)), match(wc, colnames(mat2))]
+  ord = colnames(mat2)[which(!is.na(match(colnames(mat2), colnames(mat3))))]  # removed any NAs from the list
+  mat4 = mat3[match(ord, colnames(mat3)), match(ord, colnames(mat3))]
+
+  # building and plotting a network object
+  graph <- graph.adjacency(mat4, mode = "undirected", weighted=T)    # Create Network object
+  graph = simplify(graph) 
+  V(graph)$color[1:central.nodes] = "green"
+  V(graph)$color[(central.nodes+1):length(V(graph))] = "pink"
+
+  graph = delete.vertices(graph, V(graph)[ degree(graph) == 0 ]) # delete singletons?
+  
+  plot(graph, 
+       layout = layout.kamada.kawai, 
+       main = title)
+
+  } # distill.cog func ends
+
+ # testing COG on df data
+ system.time({ distill.cog(dtm_df_tf, "COG for df TF") })   
+ system.time({ distill.cog(dtm_df_idf, "COG for df IDF", 5, 5) }) 
+
+```
+
+### Sentiment analysis
+
+
+### Sentiment-An with Tidytext
+
+There are 3 in-built sentiment dictionaries as of now in tidytext. 
+
+Let's start simple, with Bing.
+
+Which docs are most positive and negative in the corpus?
+
+```{r senti.bing}
+textdf = data_frame(text = df)   # convert to data frame
+
+bing = get_sentiments("bing")   # put all of the bing sentiment dict into object 'bing'
+
+senti.bing = textdf %>%
+  
+      mutate(linenumber = row_number()) %>%   # build line num variable
+      ungroup() %>%
+      unnest_tokens(word, text) %>%
+  
+      inner_join(get_sentiments("bing")) %>%
+  
+      count(sentiment, index = linenumber %/% 1, sort = FALSE) %>%
+      mutate(method = "bing")    # creates a column with method name
+
+senti.bing
+```
+
+Now let's see the distribution of positive and negative sentiment within documents across the corpus.
+
+Note use of the `spread()` function to combine extra row pertaining to some index (doc) and make an extra column.
+
+```{r bing_df}
+bing_df = data.frame(senti.bing %>% spread(sentiment, n, fill = 0))
+
+head(bing_df)
+```
+
+combine the negative and positive rows, subtracting negative from poisitive score and thereby computing some polarity score for each line.
+
+```{r bing_pol}
+bing_pol = bing_df %>% 
+  mutate(polarity = (positive - negative)) %>%   #create variable polarity = pos - neg
+  arrange(desc(polarity), index)    # sort by polarity
+
+bing_pol %>%  head()
+```
+Now for some quick visualization of the distribution of sentiment across the analyst call. See code below.
+
+```{r ggplot.bing}
+require(ggplot2)
+ggplot(bing_pol, 
+       aes(index, polarity)) +
+       geom_bar(stat = "identity", show.legend = FALSE) +
+      labs(title = "Sentiment in Modi corpus",
+             x = "Doc",  
+             y = "Net Polarity")
+        
+
+```
+
+Another quick visualization. We want to see which words contributed most to positive or neg sentiment in the corpus using the bing lexicon.
+
+So first we create a count of bing sentiment words that occur a lot in the corpus. 
+
+```{r bing_word_counts}
+
+bing_word_counts <- textdf %>%
+                    unnest_tokens(word, text) %>%
+                    inner_join(bing) %>%
+                    count(word, sentiment, sort = TRUE) %>%
+                    ungroup()
+
+bing_word_counts
+```
+
+Now `ggplot` it and see.
+
+```{r bing.plot}
+bing_word_counts %>%
+  filter(n > 10) %>%
+ 
+  mutate(n = ifelse(sentiment == "negative", -n, n)) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n, fill = sentiment)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ylab("Contribution to sentiment")
+```
+### Sentiment-An with AFINN
+
+```{r senti.afinn}
+# get AFINN first
+AFINN <- get_sentiments("afinn")
+AFINN
+
+#Individual sentiment score from(-5 to +5)
+# inner join AFINN words and scores with text tokens from corpus
+senti.afinn = textdf %>%
+      mutate(linenumber = row_number()) %>%
+      ungroup() %>%
+      unnest_tokens(word, text) %>%
+      inner_join(AFINN)   # returns only intersection of wordlists and all columns
+ # inner join AFINN words and scores with text tokens from corpus
+senti.afinn
+
+```
+```{r senti.afinn1}
+senti.afinn = textdf %>%
+      mutate(linenumber = row_number()) %>%
+      ungroup() %>%
+      unnest_tokens(word, text) %>%
+      inner_join(AFINN) %>%    # returns only intersection of wordlists and all columns
+      group_by(index = linenumber %/% 1) %>% 
+      summarise(sentiment = sum(score)) %>% 
+      mutate(method = "afinn")
+
+senti.afinn
+
+```
+To list bigrams where first word is a sentiment word. See code below.
+
+```{r bigrm.separate}
+# first construct and split bigrams into word1 and word2
+df_bigrams_separated <- textdf %>%
+                unnest_tokens(bigram, text, 
+                token = "ngrams", n = 2) %>%
+                separate(bigram, c("word1", "word2"), sep = " ")
+
+df_bigrams_separated
+```
+
+Next, inner join with AFINN
+
+```{r senti.bigram}
+# examine the most frequent bigrams whose first word is a sentiment word
+senti_bigrams <- df_bigrams_separated %>%
+  
+            # word1 is from bigrams and word from AFINN
+            inner_join(AFINN, by = c(word1 = "word")) %>%  
+              ungroup()
+
+senti_bigrams
+```
+
+### Sentiment-An with the NRC dictionary
+
+```{r senti.nrc}
+senti.nrc = textdf %>%
+      mutate(linenumber = row_number()) %>%
+      ungroup() %>%
+  
+      # word-tokenize & merge nrc sentiment words
+      unnest_tokens(word, text) %>%
+      inner_join(get_sentiments("nrc")) %>%
+      count(sentiment, index = linenumber %/% 1, sort = FALSE) %>%  # %/% gives quotient
+      mutate(method = "nrc")
+
+senti.nrc %>% head()
+```
+
+```{r}
+# make a neat table out of the 8 emotion dimensions
+a = data.frame(senti.nrc %>% spread(sentiment, n, fill = 0))
+head(a)
+```
+To see joyful words most occurred in the corpus. 
+
+```{r df.joy}
+
+df_joy = textdf %>%
+      unnest_tokens(word, text) %>%
+      inner_join(nrc) %>%
+      filter(sentiment == "joy") %>%
+      count(word, sort = TRUE)
+df_joy %>% head(10)
+
+
+```
+
+
+To see angry words most occurred in the corpus. 
+```{r df.anger}
+df_anger = textdf %>%
+      unnest_tokens(word, text) %>%
+      inner_join(nrc) %>%
+      filter(sentiment == "anger") %>%
+      count(word, sort = TRUE)
+df_anger %>% head(10)
+
+```
+
+```{r}
+# Emotionwise contribution
+
+barplot(
+  sort(colSums(prop.table(a[, c(3:7,10:12)]))), 
+  horiz = TRUE, 
+  cex.names = 0.7, 
+  las = 1, 
+  main = "Emotions Contribution from Corpus", xlab="Percentage"
+  )
+
+
+```
+
+```{r}
+# 
+
+barplot(
+  sort(colSums(prop.table(a[, 8:9]))), 
+  horiz = TRUE, 
+  cex.names = 0.7, 
+  main = "Sentiment Contribution from Corpus", xlab="Percentage"
+  )
+
+
+```
